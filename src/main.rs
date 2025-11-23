@@ -1,8 +1,11 @@
 use clap::{Parser, Subcommand};
 use pingora::ErrorType::InvalidHTTPHeader;
+use pingora::prelude::HttpPeer;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -83,10 +86,34 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
 
     async fn upstream_peer(
         &self,
-        _session: &mut pingora::proxy::Session,
-        _ctx: &mut Self::CTX,
+        session: &mut pingora::proxy::Session,
+        ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<pingora::prelude::HttpPeer>> {
-        todo!("implement upstream_peer")
+        let ctx = ctx.clone().unwrap();
+
+        let address = ctx.address;
+        let health_check_path = ctx.health_check.unwrap_or_default();
+
+        let health_check_url = format!("{address}{health_check_path}");
+
+        let resp = reqwest::get(health_check_url)
+            .await
+            .ok()
+            .map(|r| r.status())
+            .unwrap_or_else(|| StatusCode::SERVICE_UNAVAILABLE);
+
+        if resp != StatusCode::OK {
+            let cmd: Vec<_> = ctx.start.split_whitespace().collect();
+
+            let _ = tokio::process::Command::new(cmd[0])
+                .arg(cmd[1])
+                .spawn()
+                .expect("failed to spawn");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let peer = HttpPeer::new(address, false, "".to_owned());
+        Ok(Box::new(peer))
     }
 }
 

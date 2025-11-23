@@ -8,6 +8,7 @@ async-trait = "0.1.89"
 clap = { version = "4.5.53", features = ["derive"] }
 color-eyre = "0.6.5"
 pingora = { version = "0.6", features = ["proxy"] }
+reqwest = "0.12.24"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.48.0", features = ["full"] }
 toml = "0.9.8"

@@ -1,5 +1,11 @@
 [app1]
-address = "127.0.0.1:3000"
-start = "node /app1/server.js"
+address = "127.0.0.1:3001"
+start = "/Users/frectonz/.nix-profile/bin/bun /Users/frectonz/workspace/yarp/apps/app1.ts"
 wait_period = 1000
-health_check = "/health"
+health_check = "/api/status"
+
+[app2]
+address = "127.0.0.1:3002"
+start = "/Users/frectonz/.nix-profile/bin/bun ./apps/app2.ts"
+wait_period = 1000
+health_check = "/api/status"
