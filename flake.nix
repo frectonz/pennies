@@ -38,6 +38,7 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           buildInputs = [
+            pkgs.fzf
             pkgs.just
             pkgs.cmake
             pkgs.bacon
