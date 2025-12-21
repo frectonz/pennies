@@ -1,11 +1,14 @@
 [app1]
 address = "127.0.0.1:3001"
-start = "bun apps/app1.ts"
 wait_period = 1000
 health_check = "/api/status"
+command = "bun apps/app1.ts"
 
 [app2]
 address = "127.0.0.1:3002"
-start = "bun apps/app2.ts"
 wait_period = 1000
 health_check = "/api/status"
+
+[app2.command]
+start = "bun start"
+end = "bun end"

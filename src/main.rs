@@ -30,11 +30,25 @@ enum Command {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub address: std::net::SocketAddr,
-    pub start: String,
-    #[serde(default)]
-    pub wait_period: Option<u64>,
-    #[serde(default)]
-    pub health_check: Option<String>,
+    pub wait_period: u64,
+    pub health_check: String,
+    pub command: AppCommand,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum AppCommand {
+    Start(String),
+    StartEnd { start: String, end: String },
+}
+
+impl AppCommand {
+    fn get_start(&self) -> &str {
+        match self {
+            AppCommand::Start(s) => s,
+            AppCommand::StartEnd { start: _, end: _ } => todo!(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +81,9 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         session: &mut pingora::prelude::Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()> {
+        dbg!(&session.req_header().uri.host());
+        dbg!(session.get_header("host"));
+
         let host = session
             .downstream_session
             .get_header("host")
@@ -92,7 +109,7 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         let ctx = ctx.clone().unwrap();
 
         let address = ctx.address;
-        let health_check_path = ctx.health_check.unwrap_or_default();
+        let health_check_path = ctx.health_check;
 
         let health_check_url = format!("http://{address}{health_check_path}");
 
@@ -103,7 +120,7 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
             .unwrap_or_else(|| StatusCode::SERVICE_UNAVAILABLE);
 
         if resp != StatusCode::OK {
-            let cmd: Vec<_> = ctx.start.split_whitespace().collect();
+            let cmd: Vec<_> = ctx.command.get_start().split_whitespace().collect();
 
             let _ = tokio::process::Command::new(cmd[0])
                 .arg(cmd[1])
