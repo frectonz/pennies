@@ -1,8 +1,5 @@
 use clap::{Parser, Subcommand};
 use jiff::SignedDuration;
-use pingora::ErrorType::InvalidHTTPHeader;
-use pingora::prelude::HttpPeer;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -135,9 +132,9 @@ impl App {
             .await
             .ok()
             .map(|r| r.status())
-            .unwrap_or_else(|| StatusCode::SERVICE_UNAVAILABLE);
+            .unwrap_or_else(|| http::StatusCode::SERVICE_UNAVAILABLE);
 
-        resp == StatusCode::OK
+        resp == http::StatusCode::OK
     }
 }
 
@@ -159,7 +156,7 @@ pub struct YarpProxy {
 
 impl YarpProxy {
     fn new(config: Config) -> Self {
-        Self { config: config }
+        Self { config }
     }
 }
 
@@ -170,11 +167,17 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
         .or(session.req_header().uri.host())
 }
 
+#[derive(Clone)]
+pub struct ProxyContext {
+    host: String,
+    app: App,
+}
+
 #[async_trait::async_trait]
 impl pingora::prelude::ProxyHttp for YarpProxy {
-    type CTX = Option<App>;
+    type CTX = Option<ProxyContext>;
 
-    fn new_ctx(&self) -> Option<App> {
+    fn new_ctx(&self) -> Self::CTX {
         None
     }
 
@@ -183,10 +186,14 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         session: &mut pingora::prelude::Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()> {
-        let host = get_host(session)
-            .ok_or_else(|| pingora::Error::explain(InvalidHTTPHeader, "failed to get host"))?;
+        let host = get_host(session).ok_or_else(|| {
+            pingora::Error::explain(pingora::ErrorType::InvalidHTTPHeader, "failed to get host")
+        })?;
 
-        *ctx = self.config.get_app(host);
+        *ctx = self.config.get_app(host).map(|app| ProxyContext {
+            host: host.to_owned(),
+            app,
+        });
 
         Ok(())
     }
@@ -196,14 +203,24 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         _session: &mut pingora::proxy::Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<pingora::prelude::HttpPeer>> {
-        let ctx = ctx.clone().unwrap();
+        let ctx = ctx.clone().ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::ConnectError,
+                "failed to get proxy context",
+            )
+        })?;
 
-        if !ctx.is_running().await {
-            let _ = ctx.command.get_start().spawn().expect("failed to spawn");
+        if !ctx.app.is_running().await {
+            let _ = ctx
+                .app
+                .command
+                .get_start()
+                .spawn()
+                .expect("failed to spawn");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let peer = HttpPeer::new(ctx.address, false, "".to_owned());
+        let peer = pingora::prelude::HttpPeer::new(ctx.app.address, false, ctx.host);
         Ok(Box::new(peer))
     }
 }
