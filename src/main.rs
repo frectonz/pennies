@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -26,7 +28,7 @@ enum Command {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct App {
     pub address: SocketAddr,
     pub health_check: String,
@@ -46,7 +48,7 @@ fn default_start_timeout() -> SignedDuration {
     SignedDuration::from_secs(30)
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum AppCommand {
     Start(CommandSpec),
@@ -56,7 +58,7 @@ pub enum AppCommand {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CommandSpec {
     program: String,
     args: Vec<String>,
@@ -138,14 +140,26 @@ impl App {
     }
 }
 
+fn deserialize_apps<'de, D>(deserializer: D) -> Result<HashMap<String, Arc<RwLock<App>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = HashMap::<String, App>::deserialize(deserializer)?;
+
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| (k, Arc::new(RwLock::new(v))))
+        .collect())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    #[serde(flatten)]
-    pub apps: HashMap<String, App>,
+    #[serde(flatten, deserialize_with = "deserialize_apps")]
+    pub apps: HashMap<String, Arc<RwLock<App>>>,
 }
 
 impl Config {
-    fn get_app(&self, host: &str) -> Option<App> {
+    fn get_app(&self, host: &str) -> Option<Arc<RwLock<App>>> {
         self.apps.get(host).cloned()
     }
 }
@@ -167,10 +181,9 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
         .or(session.req_header().uri.host())
 }
 
-#[derive(Clone)]
 pub struct ProxyContext {
     host: String,
-    app: App,
+    app: Arc<RwLock<App>>,
 }
 
 #[async_trait::async_trait]
@@ -203,24 +216,21 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         _session: &mut pingora::proxy::Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<pingora::prelude::HttpPeer>> {
-        let ctx = ctx.clone().ok_or_else(|| {
+        let ctx = ctx.take().ok_or_else(|| {
             pingora::Error::explain(
                 pingora::ErrorType::ConnectError,
                 "failed to get proxy context",
             )
         })?;
 
-        if !ctx.app.is_running().await {
-            let _ = ctx
-                .app
-                .command
-                .get_start()
-                .spawn()
-                .expect("failed to spawn");
+        let app = ctx.app.read().await;
+
+        if !app.is_running().await {
+            let _ = app.command.get_start().spawn().expect("failed to spawn");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let peer = pingora::prelude::HttpPeer::new(ctx.app.address, false, ctx.host);
+        let peer = pingora::prelude::HttpPeer::new(app.address, false, ctx.host);
         Ok(Box::new(peer))
     }
 }
