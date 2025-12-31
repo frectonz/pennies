@@ -8,6 +8,7 @@ repository = "https://github.com/frectonz/pennies"
 async-trait = "0.1.89"
 clap = { version = "4.5.53", features = ["derive"] }
 color-eyre = "0.6.5"
+http = "1.4.0"
 jiff = { version = "0.2.16", features = ["serde"] }
 pingora = { version = "0.6", features = ["proxy"] }
 reqwest = "0.12.24"

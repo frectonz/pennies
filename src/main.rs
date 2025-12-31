@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Parser)]
@@ -148,16 +147,27 @@ pub struct Config {
     pub apps: HashMap<String, App>,
 }
 
+impl Config {
+    fn get_app(&self, host: &str) -> Option<App> {
+        self.apps.get(host).cloned()
+    }
+}
+
 pub struct YarpProxy {
-    config: Arc<Config>,
+    config: Config,
 }
 
 impl YarpProxy {
     fn new(config: Config) -> Self {
-        Self {
-            config: Arc::new(config),
-        }
+        Self { config: config }
     }
+}
+
+fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
+    session
+        .get_header(http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or(session.req_header().uri.host())
 }
 
 #[async_trait::async_trait]
@@ -173,22 +183,10 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         session: &mut pingora::prelude::Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()> {
-        dbg!(&session.req_header().uri.host());
-        dbg!(session.get_header("host"));
+        let host = get_host(session)
+            .ok_or_else(|| pingora::Error::explain(InvalidHTTPHeader, "failed to get host"))?;
 
-        let host = session
-            .downstream_session
-            .get_header("host")
-            .ok_or_else(|| pingora::Error::explain(InvalidHTTPHeader, "No host header detected"))?
-            .to_str()
-            .map_err(|_| {
-                pingora::Error::explain(
-                    InvalidHTTPHeader,
-                    "Failed to convert host header to string",
-                )
-            })?;
-
-        *ctx = self.config.apps.get(host).map(|c| c.to_owned());
+        *ctx = self.config.get_app(host);
 
         Ok(())
     }
