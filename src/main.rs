@@ -159,8 +159,11 @@ pub struct Config {
 }
 
 impl Config {
-    fn get_app(&self, host: &str) -> Option<Arc<RwLock<App>>> {
-        self.apps.get(host).cloned()
+    fn get_proxy_context(&self, host: &str) -> Option<ProxyContext> {
+        self.apps.get(host).cloned().map(|app| ProxyContext {
+            host: host.to_owned(),
+            app,
+        })
     }
 }
 
@@ -203,10 +206,7 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
             pingora::Error::explain(pingora::ErrorType::InvalidHTTPHeader, "failed to get host")
         })?;
 
-        *ctx = self.config.get_app(host).map(|app| ProxyContext {
-            host: host.to_owned(),
-            app,
-        });
+        *ctx = self.config.get_proxy_context(host);
 
         Ok(())
     }
