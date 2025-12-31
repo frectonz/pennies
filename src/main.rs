@@ -31,7 +31,7 @@ enum Command {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AppConfig {
+pub struct App {
     pub address: SocketAddr,
     pub health_check: String,
     pub command: AppCommand,
@@ -125,10 +125,27 @@ impl AppCommand {
     }
 }
 
+impl App {
+    async fn is_running(&self) -> bool {
+        let address = self.address;
+        let health_check_path = self.health_check.as_str();
+
+        let health_check_url = format!("http://{address}{health_check_path}");
+
+        let resp = reqwest::get(health_check_url)
+            .await
+            .ok()
+            .map(|r| r.status())
+            .unwrap_or_else(|| StatusCode::SERVICE_UNAVAILABLE);
+
+        resp == StatusCode::OK
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(flatten)]
-    pub apps: HashMap<String, AppConfig>,
+    pub apps: HashMap<String, App>,
 }
 
 pub struct YarpProxy {
@@ -145,8 +162,9 @@ impl YarpProxy {
 
 #[async_trait::async_trait]
 impl pingora::prelude::ProxyHttp for YarpProxy {
-    type CTX = Option<AppConfig>;
-    fn new_ctx(&self) -> Option<AppConfig> {
+    type CTX = Option<App>;
+
+    fn new_ctx(&self) -> Option<App> {
         None
     }
 
@@ -182,23 +200,12 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
     ) -> pingora::Result<Box<pingora::prelude::HttpPeer>> {
         let ctx = ctx.clone().unwrap();
 
-        let address = ctx.address;
-        let health_check_path = ctx.health_check;
-
-        let health_check_url = format!("http://{address}{health_check_path}");
-
-        let resp = reqwest::get(health_check_url)
-            .await
-            .ok()
-            .map(|r| r.status())
-            .unwrap_or_else(|| StatusCode::SERVICE_UNAVAILABLE);
-
-        if resp != StatusCode::OK {
+        if !ctx.is_running().await {
             let _ = ctx.command.get_start().spawn().expect("failed to spawn");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let peer = HttpPeer::new(address, false, "".to_owned());
+        let peer = HttpPeer::new(ctx.address, false, "".to_owned());
         Ok(Box::new(peer))
     }
 }
