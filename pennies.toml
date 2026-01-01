@@ -10,5 +10,5 @@ wait_period = "10m"
 health_check = "/api/status"
 
 [app2.command]
-start = "bun start"
-end = "bun end"
+start = "bun apps/app2.ts"
+end = "pkill bun"
