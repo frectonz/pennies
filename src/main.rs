@@ -277,11 +277,10 @@ pub struct Config {
 }
 
 impl Config {
-    fn get_proxy_context(&self, host: &str) -> Option<ProxyContext> {
-        self.apps
-            .get(host)
-            .cloned()
-            .map(|app| ProxyContext::new(host, app))
+    async fn get_proxy_context(&self, host: &str) -> Option<ProxyContext> {
+        let app = self.apps.get(host)?.clone();
+        let proxy_context = ProxyContext::new(host, app).await;
+        Some(proxy_context)
     }
 }
 
@@ -305,13 +304,21 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
 pub struct ProxyContext {
     host: String,
     app: Arc<RwLock<App>>,
+    peer: Box<pingora::prelude::HttpPeer>,
 }
 
 impl ProxyContext {
-    fn new(host: &str, app: Arc<RwLock<App>>) -> Self {
+    async fn new(host: &str, app: Arc<RwLock<App>>) -> Self {
+        let address = app.read().await.address;
+
         Self {
-            host: host.to_owned(),
             app,
+            host: host.to_owned(),
+            peer: Box::new(pingora::prelude::HttpPeer::new(
+                address,
+                false,
+                host.to_owned(),
+            )),
         }
     }
 }
@@ -324,24 +331,24 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         None
     }
 
-    async fn early_request_filter(
+    async fn request_filter(
         &self,
         session: &mut pingora::prelude::Session,
         ctx: &mut Self::CTX,
-    ) -> pingora::Result<()> {
+    ) -> pingora::Result<bool> {
         let host = get_host(session).ok_or_else(|| {
             warn!("request missing host header");
             pingora::Error::explain(pingora::ErrorType::InvalidHTTPHeader, "failed to get host")
         })?;
 
         debug!(host = %host, "processing request");
-        *ctx = self.config.get_proxy_context(host);
+        *ctx = self.config.get_proxy_context(host).await;
 
         if ctx.is_none() {
             warn!(host = %host, "no app configured for host");
         }
 
-        Ok(())
+        Ok(false)
     }
 
     async fn upstream_peer(
@@ -365,8 +372,7 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
         let address = ctx.app.read().await.address;
         debug!(host = %ctx.host, upstream = %address, "connecting to upstream");
 
-        let peer = pingora::prelude::HttpPeer::new(address, false, ctx.host);
-        Ok(Box::new(peer))
+        Ok(ctx.peer.clone())
     }
 }
 
