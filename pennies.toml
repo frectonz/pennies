@@ -1,14 +1,14 @@
-[app1]
+["app1.local"]
 address = "127.0.0.1:3001"
 wait_period = "1m"
 health_check = "/api/status"
 command = "bun apps/app1.ts"
 
-[app2]
+["app2.local"]
 address = "127.0.0.1:3002"
 wait_period = "10m"
 health_check = "/api/status"
 
-[app2.command]
+["app2.local".command]
 start = "bun apps/app2.ts"
 end = "pkill bun"

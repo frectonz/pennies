@@ -298,6 +298,7 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
     session
         .get_header(http::header::HOST)
         .and_then(|value| value.to_str().ok())
+        .and_then(|host| host.split(':').next())
         .or(session.req_header().uri.host())
 }
 
