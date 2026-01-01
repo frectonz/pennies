@@ -37,6 +37,9 @@ pub struct App {
     pub wait_period: SignedDuration,
     #[serde(default = "default_start_timeout")]
     pub start_timeout: SignedDuration,
+
+    #[serde(skip)]
+    pub kill_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 fn default_wait_period() -> SignedDuration {
@@ -170,6 +173,45 @@ impl App {
 
         tokio::time::timeout(self.start_timeout.unsigned_abs(), wait_for_running).await
     }
+
+    async fn start_app(app: &Arc<RwLock<App>>) -> pingora::Result<()> {
+        let app = app.clone();
+
+        let mut app = app.write().await;
+
+        if !app.is_running().await {
+            app.command.start();
+
+            if app.wait_for_running().await.is_err() {
+                app.command.stop().await;
+                return Err(pingora::Error::explain(
+                    pingora::ErrorType::ConnectError,
+                    "failed to start app",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn schedule_kill(app: &Arc<RwLock<App>>) {
+        let app = app.clone();
+
+        if let Some(task) = app.write().await.kill_task.take() {
+            task.abort();
+        }
+
+        let handle = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                let wait_period = app.read().await.wait_period.unsigned_abs();
+                tokio::time::sleep(wait_period).await;
+                app.write().await.command.stop().await;
+            })
+        };
+
+        app.write().await.kill_task = Some(handle);
+    }
 }
 
 fn deserialize_apps<'de, D>(deserializer: D) -> Result<HashMap<String, Arc<RwLock<App>>>, D::Error>
@@ -192,10 +234,10 @@ pub struct Config {
 
 impl Config {
     fn get_proxy_context(&self, host: &str) -> Option<ProxyContext> {
-        self.apps.get(host).cloned().map(|app| ProxyContext {
-            host: host.to_owned(),
-            app,
-        })
+        self.apps
+            .get(host)
+            .cloned()
+            .map(|app| ProxyContext::new(host, app))
     }
 }
 
@@ -219,6 +261,15 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
 pub struct ProxyContext {
     host: String,
     app: Arc<RwLock<App>>,
+}
+
+impl ProxyContext {
+    fn new(host: &str, app: Arc<RwLock<App>>) -> Self {
+        Self {
+            host: host.to_owned(),
+            app,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -255,20 +306,10 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
             )
         })?;
 
-        let mut app = ctx.app.write().await;
+        App::start_app(&ctx.app).await?;
+        App::schedule_kill(&ctx.app).await;
 
-        if !app.is_running().await {
-            app.command.start();
-            if app.wait_for_running().await.is_err() {
-                app.command.stop().await;
-                return Err(pingora::Error::explain(
-                    pingora::ErrorType::ConnectError,
-                    "failed to start app",
-                ));
-            }
-        }
-
-        let peer = pingora::prelude::HttpPeer::new(app.address, false, ctx.host);
+        let peer = pingora::prelude::HttpPeer::new(ctx.app.read().await.address, false, ctx.host);
         Ok(Box::new(peer))
     }
 }
