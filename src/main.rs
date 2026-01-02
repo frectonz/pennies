@@ -119,6 +119,17 @@ impl<'de> Deserialize<'de> for CommandSpec {
 }
 
 impl CommandSpec {
+    fn is_child_running(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(_)) => false,
+                Ok(None) => true,
+                Err(_) => false,
+            },
+            None => false,
+        }
+    }
+
     #[instrument(skip(self), fields(program = %self.program))]
     fn run(&mut self) {
         let should_spawn = match self.child.as_mut() {
@@ -166,6 +177,13 @@ impl CommandSpec {
 }
 
 impl AppCommand {
+    fn is_child_running(&mut self) -> bool {
+        match self {
+            AppCommand::Start(start) => start.is_child_running(),
+            AppCommand::StartEnd { start, .. } => start.is_child_running(),
+        }
+    }
+
     #[instrument(skip(self))]
     fn start(&mut self) {
         debug!("starting app command");
@@ -256,15 +274,19 @@ impl App {
 
     #[instrument(skip(app))]
     async fn start_app(app: &Arc<RwLock<App>>) -> pingora::Result<()> {
-        let app = app.clone();
+        // Fast path: if child process is already running, skip health check
+        if app.write().await.command.is_child_running() {
+            debug!("child process already running, skipping health check");
+            return Ok(());
+        }
 
-        let mut app = app.write().await;
+        // Slow path: no running child, do health check to confirm app state
+        if !app.read().await.is_running().await {
+            let address = app.read().await.address;
+            info!(%address, "app not running, starting it");
+            app.write().await.command.start();
 
-        if !app.is_running().await {
-            info!(address = %app.address, "app not running, starting it");
-            app.command.start();
-
-            if app.wait_for_running().await.is_err() {
+            if app.read().await.wait_for_running().await.is_err() {
                 error!("failed to start app within timeout");
                 return Err(pingora::Error::explain(
                     pingora::ErrorType::ConnectError,
@@ -272,7 +294,8 @@ impl App {
                 ));
             }
         } else {
-            debug!(address = %app.address, "app already running");
+            let address = app.read().await.address;
+            debug!(%address, "app already running");
         }
 
         Ok(())
@@ -280,8 +303,6 @@ impl App {
 
     #[instrument(skip(app))]
     async fn schedule_kill(app: &Arc<RwLock<App>>) {
-        let app = app.clone();
-
         let mut app_guard = app.write().await;
 
         if let Some(task) = app_guard.kill_task.take() {
