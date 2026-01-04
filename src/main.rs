@@ -482,11 +482,11 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
+    let filter =
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "tracing=info,pennies=debug".to_owned());
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
+        .with_env_filter(filter)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .init();
 
     let Args {
