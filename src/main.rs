@@ -404,6 +404,20 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
         .or(session.req_header().uri.host())
 }
 
+#[allow(dead_code)]
+trait Collector {
+    async fn register_app(&self, app_name: &str, app: &App);
+
+    async fn app_started(&self, app_id: &str) -> &str;
+    async fn app_stopped(&self, app_id: &str);
+
+    async fn app_start_failed(&self, app_id: &str);
+    async fn app_stop_failed(&self, app_id: &str);
+
+    async fn append_stdout(&self, run_id: &str, data: &[u8]);
+    async fn append_stderr(&self, run_id: &str, data: &[u8]);
+}
+
 pub struct ProxyContext {
     host: String,
     app: Arc<RwLock<App>>,
