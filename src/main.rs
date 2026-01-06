@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -302,7 +303,7 @@ impl App {
     }
 
     #[instrument(skip(app))]
-    async fn start_app(app: &Arc<RwLock<App>>) -> pingora::Result<()> {
+    async fn start_app(app: &Arc<RwLock<App>>, collector: impl Collector) -> pingora::Result<()> {
         // Fast path: if child process is already running, skip health check
         if app.write().await.command.is_child_running() {
             debug!("child process already running, skipping health check");
@@ -331,7 +332,7 @@ impl App {
     }
 
     #[instrument(skip(app))]
-    async fn schedule_kill(app: &Arc<RwLock<App>>) {
+    async fn schedule_kill(app: &Arc<RwLock<App>>, collector: impl Collector) {
         let mut app_guard = app.write().await;
 
         if let Some(task) = app_guard.kill_task.take() {
@@ -386,13 +387,17 @@ impl Config {
     }
 }
 
-pub struct YarpProxy {
+struct YarpProxy<C> {
     config: Config,
+    collector: C,
 }
 
-impl YarpProxy {
-    fn new(config: Config) -> Self {
-        Self { config }
+impl<C> YarpProxy<C>
+where
+    C: Collector,
+{
+    fn new(config: Config, collector: C) -> Self {
+        Self { config, collector }
     }
 }
 
@@ -405,7 +410,7 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
 }
 
 #[allow(dead_code)]
-trait Collector {
+trait Collector: Sync + Send + Clone + Debug {
     async fn register_app(&self, app_name: &str, app: &App);
 
     async fn app_started(&self, app_id: &str) -> &str;
@@ -416,6 +421,40 @@ trait Collector {
 
     async fn append_stdout(&self, run_id: &str, data: &[u8]);
     async fn append_stderr(&self, run_id: &str, data: &[u8]);
+}
+
+#[derive(Debug, Clone)]
+struct NoOpCollector;
+
+#[allow(dead_code)]
+impl Collector for NoOpCollector {
+    async fn register_app(&self, _app_name: &str, _app: &App) {
+        todo!()
+    }
+
+    async fn app_started(&self, _app_id: &str) -> &str {
+        todo!()
+    }
+
+    async fn app_stopped(&self, _app_id: &str) {
+        todo!()
+    }
+
+    async fn app_start_failed(&self, _app_id: &str) {
+        todo!()
+    }
+
+    async fn app_stop_failed(&self, _app_id: &str) {
+        todo!()
+    }
+
+    async fn append_stdout(&self, _run_id: &str, _data: &[u8]) {
+        todo!()
+    }
+
+    async fn append_stderr(&self, _run_id: &str, _data: &[u8]) {
+        todo!()
+    }
 }
 
 pub struct ProxyContext {
@@ -441,7 +480,10 @@ impl ProxyContext {
 }
 
 #[async_trait::async_trait]
-impl pingora::prelude::ProxyHttp for YarpProxy {
+impl<C> pingora::prelude::ProxyHttp for YarpProxy<C>
+where
+    C: Collector,
+{
     type CTX = Option<ProxyContext>;
 
     fn new_ctx(&self) -> Self::CTX {
@@ -483,8 +525,8 @@ impl pingora::prelude::ProxyHttp for YarpProxy {
 
         info!(host = %ctx.host, "proxying request");
 
-        App::start_app(&ctx.app).await?;
-        App::schedule_kill(&ctx.app).await;
+        App::start_app(&ctx.app, self.collector.clone()).await?;
+        App::schedule_kill(&ctx.app, self.collector.clone()).await;
 
         let address = ctx.app.read().await.address;
         debug!(host = %ctx.host, upstream = %address, "connecting to upstream");
@@ -526,7 +568,7 @@ fn main() -> color_eyre::Result<()> {
         );
     }
 
-    let proxy = YarpProxy::new(config);
+    let proxy = YarpProxy::new(config, NoOpCollector);
 
     let mut proxy_service = pingora::prelude::http_proxy_service(&server.configuration, proxy);
     proxy_service.add_tcp(&address);
