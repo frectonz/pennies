@@ -122,6 +122,13 @@ impl<'de> Deserialize<'de> for CommandSpec {
     }
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+struct RunOptions<C: Collector> {
+    run_id: RunId,
+    collector: C,
+}
+
 impl CommandSpec {
     fn is_child_running(&mut self) -> bool {
         match self.child.as_mut() {
@@ -135,7 +142,7 @@ impl CommandSpec {
     }
 
     #[instrument(skip(self), fields(program = %self.program))]
-    fn run(&mut self, run_id: Option<RunId>, collector: Option<impl Collector>) {
+    fn run<C: Collector>(&mut self, opts: Option<RunOptions<C>>) {
         let should_spawn = match self.child.as_mut() {
             Some(child) => match child.try_wait() {
                 Ok(Some(exit)) => {
@@ -201,14 +208,14 @@ impl AppCommand {
     }
 
     #[instrument(skip(self))]
-    fn start(&mut self, run_id: RunId, collector: impl Collector) {
+    fn start<C: Collector>(&mut self, opts: Option<RunOptions<C>>) {
         debug!("starting app command");
         let start = match self {
             AppCommand::Start(start) => start.as_mut(),
             AppCommand::StartEnd { start, end: _ } => start.as_mut(),
         };
 
-        start.run(Some(run_id), Some(collector));
+        start.run(opts);
     }
 
     #[instrument(skip(self))]
@@ -218,7 +225,7 @@ impl AppCommand {
             AppCommand::Start(start) => start.kill().await,
             AppCommand::StartEnd { start, end } => {
                 start.kill().await;
-                end.run(None, None::<NoOpCollector>)
+                end.run::<NoOpCollector>(None)
             }
         };
     }
@@ -318,8 +325,12 @@ impl App {
         if !app.read().await.is_running().await {
             let address = app.read().await.address;
             let run_id = collector.app_started(host).await;
+
             info!(%address, "app not running, starting it");
-            app.write().await.command.start(run_id, collector.clone());
+            app.write()
+                .await
+                .command
+                .start(Some(RunOptions { run_id, collector }));
 
             if app.read().await.wait_for_running().await.is_err() {
                 error!("failed to start app within timeout");
@@ -448,27 +459,27 @@ struct NoOpCollector;
 #[async_trait::async_trait]
 impl Collector for NoOpCollector {
     async fn app_started(&self, host: &Host) -> RunId {
-        todo!()
+        unimplemented!()
     }
 
     async fn app_stopped(&self, host: &Host) {
-        todo!()
+        unimplemented!()
     }
 
     async fn app_start_failed(&self, host: &Host) {
-        todo!()
+        unimplemented!()
     }
 
     async fn app_stop_failed(&self, host: &Host) {
-        todo!()
+        unimplemented!()
     }
 
     async fn append_stdout(&self, run_id: &RunId, data: &[u8]) {
-        todo!()
+        unimplemented!()
     }
 
     async fn append_stderr(&self, run_id: &RunId, data: &[u8]) {
-        todo!()
+        unimplemented!()
     }
 }
 
