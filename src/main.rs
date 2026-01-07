@@ -135,7 +135,7 @@ impl CommandSpec {
     }
 
     #[instrument(skip(self), fields(program = %self.program))]
-    fn run(&mut self) {
+    fn run(&mut self, run_id: Option<RunId>, collector: Option<impl Collector>) {
         let should_spawn = match self.child.as_mut() {
             Some(child) => match child.try_wait() {
                 Ok(Some(exit)) => {
@@ -201,14 +201,14 @@ impl AppCommand {
     }
 
     #[instrument(skip(self))]
-    fn start(&mut self) {
+    fn start(&mut self, run_id: RunId, collector: impl Collector) {
         debug!("starting app command");
         let start = match self {
             AppCommand::Start(start) => start.as_mut(),
             AppCommand::StartEnd { start, end: _ } => start.as_mut(),
         };
 
-        start.run();
+        start.run(Some(run_id), Some(collector));
     }
 
     #[instrument(skip(self))]
@@ -218,7 +218,7 @@ impl AppCommand {
             AppCommand::Start(start) => start.kill().await,
             AppCommand::StartEnd { start, end } => {
                 start.kill().await;
-                end.run()
+                end.run(None, None::<NoOpCollector>)
             }
         };
     }
@@ -303,7 +303,11 @@ impl App {
     }
 
     #[instrument(skip(app))]
-    async fn start_app(app: &Arc<RwLock<App>>, collector: impl Collector) -> pingora::Result<()> {
+    async fn start_app(
+        host: &Host,
+        app: &Arc<RwLock<App>>,
+        collector: impl Collector,
+    ) -> pingora::Result<()> {
         // Fast path: if child process is already running, skip health check
         if app.write().await.command.is_child_running() {
             debug!("child process already running, skipping health check");
@@ -313,8 +317,9 @@ impl App {
         // Slow path: no running child, do health check to confirm app state
         if !app.read().await.is_running().await {
             let address = app.read().await.address;
+            let run_id = collector.app_started(host).await;
             info!(%address, "app not running, starting it");
-            app.write().await.command.start();
+            app.write().await.command.start(run_id, collector.clone());
 
             if app.read().await.wait_for_running().await.is_err() {
                 error!("failed to start app within timeout");
@@ -332,7 +337,7 @@ impl App {
     }
 
     #[instrument(skip(app))]
-    async fn schedule_kill(app: &Arc<RwLock<App>>, collector: impl Collector) {
+    async fn schedule_kill(host: &Host, app: &Arc<RwLock<App>>, collector: impl Collector) {
         let mut app_guard = app.write().await;
 
         if let Some(task) = app_guard.kill_task.take() {
@@ -409,56 +414,66 @@ fn get_host(session: &pingora::prelude::Session) -> Option<&str> {
         .or(session.req_header().uri.host())
 }
 
+#[derive(Debug)]
+struct Host(String);
+
+#[derive(Debug)]
 #[allow(dead_code)]
+struct RunId(String);
+
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[allow(dead_code)]
+#[async_trait::async_trait]
 trait Collector: Sync + Send + Clone + Debug {
-    async fn register_app(&self, app_name: &str, app: &App);
+    async fn app_started(&self, host: &Host) -> RunId;
+    async fn app_stopped(&self, host: &Host);
 
-    async fn app_started(&self, app_id: &str) -> &str;
-    async fn app_stopped(&self, app_id: &str);
+    async fn app_start_failed(&self, host: &Host);
+    async fn app_stop_failed(&self, host: &Host);
 
-    async fn app_start_failed(&self, app_id: &str);
-    async fn app_stop_failed(&self, app_id: &str);
-
-    async fn append_stdout(&self, run_id: &str, data: &[u8]);
-    async fn append_stderr(&self, run_id: &str, data: &[u8]);
+    async fn append_stdout(&self, run_id: &RunId, data: &[u8]);
+    async fn append_stderr(&self, run_id: &RunId, data: &[u8]);
 }
 
 #[derive(Debug, Clone)]
 struct NoOpCollector;
 
 #[allow(dead_code)]
+#[allow(unused_variables)]
+#[async_trait::async_trait]
 impl Collector for NoOpCollector {
-    async fn register_app(&self, _app_name: &str, _app: &App) {
+    async fn app_started(&self, host: &Host) -> RunId {
         todo!()
     }
 
-    async fn app_started(&self, _app_id: &str) -> &str {
+    async fn app_stopped(&self, host: &Host) {
         todo!()
     }
 
-    async fn app_stopped(&self, _app_id: &str) {
+    async fn app_start_failed(&self, host: &Host) {
         todo!()
     }
 
-    async fn app_start_failed(&self, _app_id: &str) {
+    async fn app_stop_failed(&self, host: &Host) {
         todo!()
     }
 
-    async fn app_stop_failed(&self, _app_id: &str) {
+    async fn append_stdout(&self, run_id: &RunId, data: &[u8]) {
         todo!()
     }
 
-    async fn append_stdout(&self, _run_id: &str, _data: &[u8]) {
-        todo!()
-    }
-
-    async fn append_stderr(&self, _run_id: &str, _data: &[u8]) {
+    async fn append_stderr(&self, run_id: &RunId, data: &[u8]) {
         todo!()
     }
 }
 
 pub struct ProxyContext {
-    host: String,
+    host: Host,
     app: Arc<RwLock<App>>,
     peer: Box<pingora::prelude::HttpPeer>,
 }
@@ -469,7 +484,7 @@ impl ProxyContext {
 
         Self {
             app,
-            host: host.to_owned(),
+            host: Host(host.to_owned()),
             peer: Box::new(pingora::prelude::HttpPeer::new(
                 address,
                 false,
@@ -525,8 +540,8 @@ where
 
         info!(host = %ctx.host, "proxying request");
 
-        App::start_app(&ctx.app, self.collector.clone()).await?;
-        App::schedule_kill(&ctx.app, self.collector.clone()).await;
+        App::start_app(&ctx.host, &ctx.app, self.collector.clone()).await?;
+        App::schedule_kill(&ctx.host, &ctx.app, self.collector.clone()).await;
 
         let address = ctx.app.read().await.address;
         debug!(host = %ctx.host, upstream = %address, "connecting to upstream");
